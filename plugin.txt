@@ -1,0 +1,3 @@
+name=SimpleEnunuServer v0.1.0_local7 (&9)
+execute=.\simple_enunu_start.bat
+Plugin_Launcher=ENUNU
