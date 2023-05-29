@@ -1,8 +1,19 @@
-# SimpleEnunu
+# SimpleEnunuServer
+
+https://github.com/rokujyushi/ENUNU
+サーバーシステムはこちらをベースに作成しています。
+
+The server system is based on this one.
 
 メンテしやすく、最新のNNSVSが使いやすいようにしたENUNUです。
 
 Another ENUNU for enthusiasts and developers, easy to catch up with NNSVS.
+
+SimpleEnunu-0.1.0+0.local.7をベースに作成したEnunuServerです。
+OpenUTAUに対応する目的で作成されました。
+
+EnunuServer created based on SimpleEnunu-0.1.0+0.local.7.
+It was created for the purpose of supporting OpenUTAU.
 
 
 ## How to install / インストール方法
