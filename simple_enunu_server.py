@@ -65,25 +65,12 @@ def vocoder(path_ust: str,out_wav_path: str):
     
     path_full_timing, path_mono_timing = enunu_steps.run_timing(config, temp_dir,engine)
 
-    path_acoustic, path_f0, path_spectrogram, \
-        path_aperiodicity = enunu_steps.run_acoustic(config, temp_dir,engine)
-    
-    
-    for path in (path_f0, path_spectrogram, path_aperiodicity):
-        if(os.path.isfile(path)):
-            arr = np.loadtxt(path, delimiter=',', dtype=np.float64)
-            np.save(path[:-4] + '.npy', arr)
-
     path_wav = enunu_steps.run_synthesizer(config, temp_dir,out_wav_path,engine)
 
     
     
     return {
         'path_wav': path_wav,
-        'path_acoustic': path_acoustic,
-        'path_f0': path_f0,
-        'path_spectrogram': path_spectrogram,
-        'path_aperiodicity': path_aperiodicity,
     }
 
 

@@ -23,8 +23,8 @@ import numpy as np
 import utaupy
 import yaml
 from nnmnkwii.io import hts
-from nnmnkwii.preprocessing.f0 import interp1d
 from scipy.io import wavfile
+from scipy import interpolate
 from omegaconf import DictConfig, OmegaConf
 
 # scikit-learn で警告が出るのを無視
@@ -211,7 +211,7 @@ def get_paths(temp_dir: str):
     path_f0 = abspath(join(temp_dir, 'f0.csv'))
     path_spectrogram = abspath(join(temp_dir, 'spectrogram.csv'))
     path_aperiodicity = abspath(join(temp_dir, 'aperiodicity.csv'))
-    path_question = abspath(join(temp_dir, 'qst.hed'))
+    path_question = abspath(join(temp_dir, 'temp.hed'))
     return path_temp_ust, path_temp_table, \
         path_full_score, path_mono_score, \
         path_full_timing, path_mono_timing, \
@@ -223,10 +223,10 @@ def set_config(config: DictConfig,model_dir: str,temp_dir: str):
     path_full_score, path_mono_score, \
     path_full_timing, path_mono_timing, \
     path_acoustic, path_f0, path_spectrogram, \
-    path_aperiodicity, ex_path_question = get_paths(temp_dir)
+    path_aperiodicity, temp_path_question = get_paths(temp_dir)
     path_question = abspath(join(model_dir, 'qst.hed'))
-    if isfile(ex_path_question):
-        path_question = ex_path_question
+    if isfile(temp_path_question):
+        path_question = temp_path_question
     enconfigObj = {
         "verbose": 0,
         "model_dir": model_dir,
@@ -266,6 +266,8 @@ class SimpleEnunuServer(SPSVS):
         self.path_f0 = None
         self.path_spcetrogram = None
         self.path_aperiodicity = None
+        self.path_question = None
+        
         # self.path_wav = None
 
     
@@ -277,47 +279,36 @@ class SimpleEnunuServer(SPSVS):
         self.path_full_score, self.path_mono_score, \
         self.path_full_timing, self.path_mono_timing, \
         self.path_acoustic, self.path_f0, self.path_spcetrogram, \
-        self.path_aperiodicity, path_question = get_paths(temp_dir)
+        self.path_aperiodicity, self.path_question = get_paths(temp_dir)
 
-    def load_world_param(self,multistream_features):
-        mgc, lf0, vuv, bap = multistream_features
-        sr = self.sample_rate
-        if isfile(self.path_f0):
-            f0 = np.loadtxt(self.path_f0, delimiter=',', dtype=np.float64)
-            # lf0パラメータの生成
-            lf0 = f0.copy()
-            lf0[np.nonzero(f0)] = np.log(f0[np.nonzero(f0)])
-            # NOTE: interpolation is necessary
-            lf0 = interp1d(lf0, kind="cubic")
-            lf0 = lf0[:, None] if len(lf0.shape) == 1 else lf0
-
-        if isfile(self.path_spcetrogram) and False:
-            spectrogram = np.loadtxt(self.path_spcetrogram, delimiter=',', dtype=np.float64)
-            # mgcパラメータの生成
-            spectrogram = np.exp(spectrogram)
-            mgc = pyworld.code_spectral_envelope(spectrogram.astype(np.float64), sr, 60)
-            #mgc = pyworld.code_spectral_envelope(spectrogram.astype(np.float64), sr, 60).astype(np.float32)
-
-
-        if isfile(self.path_aperiodicity) and False:
-            aperiodicity = np.loadtxt(self.path_aperiodicity, delimiter=',', dtype=np.float64)
-            # vuvパラメータの生成
-            #vuv = (aperiodicity[:, 0] < 0.5).astype(np.float32)
-            #vuv = (f0 > 0).astype(np.float32)
-            # vuvの抽出
-            vuv = (lf0 != 0).astype(np.float) # 無声部分は0になっている
-
-            # bapパラメータの生成
-            bap = pyworld.code_aperiodicity(aperiodicity, sr)  # fs: サンプリングレート
-
-        
-        multistream_features = (mgc, lf0, vuv, bap)
-
-        #if self.feature_type == "world_org" and isfile(self.path_f0) and isfile(self.path_spcetrogram) and isfile(self.path_aperiodicity):
-            #multistream_features = (f0, spectrogram, aperiodicity)
-
-        return multistream_features
-
+    def edit_timing(self, duration_modified_labels):
+        """外部ツールでタイミング補正する
+        """
+        # タイミング補正ツールが指定されていない時はskip
+        if 'extensions' not in self.config:
+            return duration_modified_labels
+        if self.config.extensions.get('timing_editor') is None:
+            return duration_modified_labels
+        # 外部ツールでmono_timingを編集
+        self.logger.info(
+            'Editing timing with %s',
+            self.config.extensions.timing_editor
+        )
+        enulib.extensions.run_extension(
+            self.config.extensions.timing_editor,
+            full_score=self.path_full_score,
+            mono_score=self.path_mono_score,
+            full_timing=self.path_full_timing,
+            mono_timing=self.path_mono_timing
+        )
+        # mono_timing の時刻情報を full_timing に移植
+        enulib.extensions.merge_mono_time_change_to_full(
+            self.path_mono_timing,
+            self.path_full_timing
+        )
+        # 編集後のfull_timing を読み取る
+        duration_modified_labels = hts.load(self.path_full_timing).round_()
+        return duration_modified_labels
 
     def svs_timing(
         self,
@@ -381,7 +372,42 @@ class SimpleEnunuServer(SPSVS):
 
         return self.path_mono_score,self.path_mono_timing,self.path_full_timing
     
-    
+
+    def interp1d(self,f0=[],kind='linear'):
+        ndim = f0.ndim
+        if len(f0) != f0.size:
+            raise RuntimeError("1d array is only supported")
+        continuous_f0 = f0.flatten()
+        nonzero_indices = np.where(continuous_f0 > 0)[0]
+
+        # Nothing to do
+        if len(nonzero_indices) <= 0:
+            return f0
+
+        # Need this to insert continuous values for the first/end silence segments
+        continuous_f0[0] = continuous_f0[nonzero_indices[0]]
+        continuous_f0[-1] = continuous_f0[nonzero_indices[-1]]
+
+        # Build interpolation function
+        nonzero_indices = np.where(continuous_f0 > 0)[0]
+        if kind == "akima":
+            interp_func = interpolate.Akima1DInterpolator(
+                x=nonzero_indices, y=continuous_f0[continuous_f0 > 0])
+        elif kind == "pchip":
+            interp_func = interpolate.PchipInterpolator(
+                x=nonzero_indices, y=continuous_f0[continuous_f0 > 0])
+        else:
+            interp_func = interpolate.interp1d(
+            nonzero_indices, continuous_f0[continuous_f0 > 0], kind=kind)
+
+        # Fill silence segments with interpolated values
+        zero_indices = np.where(continuous_f0 <= 0)[0]
+        continuous_f0[zero_indices] = interp_func(zero_indices)
+
+        if ndim == 2:
+            return continuous_f0[:, None]
+        return continuous_f0
+
 
     def svs_acoustic(
         self,
@@ -400,6 +426,7 @@ class SimpleEnunuServer(SPSVS):
         loudness_norm=False,
         target_loudness=-20,
         segmented_synthesis=False,
+        kind='linear',
         **kwargs
     ):
         """Synthesize waveform from HTS labels.
@@ -430,12 +457,19 @@ class SimpleEnunuServer(SPSVS):
         if post_filter_type not in ["merlin", "nnsvs", "gv", "none"]:
             raise ValueError(f"Unknown post-filter type: {post_filter_type}")
         
-        # self.feature_type = self.config.get("feature_type", "world")
-        
         # 編集後のfull_timing を読み取る
-        duration_modified_labels = self.predict_timing(labels) #hts.load(self.path_full_timing).round_()
-
-
+        duration_modified_labels = self.predict_timing(labels)
+        # NOTE: ここにタイミング補正のための割り込み処理を追加-----------
+        # mono_score を出力
+        with open(self.path_mono_score, 'w', encoding='utf-8') as f:
+            f.write(str(nnsvs.io.hts.full_to_mono(labels)))
+        # mono_timing を出力
+        with open(self.path_mono_timing, 'w', encoding='utf-8') as f:
+            f.write(str(nnsvs.io.hts.full_to_mono(duration_modified_labels)))
+        # full_timing を出力
+        with open(self.path_full_timing, 'w', encoding='utf-8') as f:
+            f.write(str(duration_modified_labels))
+        
         # NOTE: segmented synthesis is not well tested. There MUST be better ways
         # to do this.
         if segmented_synthesis:
@@ -448,7 +482,7 @@ class SimpleEnunuServer(SPSVS):
                 # the following parameters are based on experiments in the NNSVS's paper
                 # tuned with Namine Ritsu's database
                 silence_threshold=0.1,
-                min_duration=5.0,
+                min_duration=1.9,
                 force_split_threshold=5.0,
             )
             from tqdm.auto import tqdm
@@ -460,7 +494,8 @@ class SimpleEnunuServer(SPSVS):
 
         # Run acoustic model and vocoder
         hts_frame_shift = int(self.config.frame_period * 1e4)
-        wavs = []
+        datas,f0s, spectrograms, aperiodicitys = [],[],[],[]
+        params = 0
         self.logger.info(
             f"Number of segments: {len(duration_modified_labels_segs)}")
         for duration_modified_labels_seg in tqdm(
@@ -468,23 +503,22 @@ class SimpleEnunuServer(SPSVS):
             desc="[segment]",
             total=len(duration_modified_labels_segs),
         ):
-            duration_modified_labels_seg.frame_shift = hts_frame_shift
+            duration_modified_labels.frame_shift = hts_frame_shift
 
             # Predict acoustic features
             # NOTE: if non-zero pre_f0_shift_in_cent is specified, the input pitch
             # will be shifted before running the acoustic model
             acoustic_features = self.predict_acoustic(
-                duration_modified_labels_seg,
+                duration_modified_labels,
                 f0_shift_in_cent=style_shift * 100,
             )
 
-            f0, spectrogram, aperiodicity = None,None,None
             # Post-processing for acoustic features
             # NOTE: if non-zero post_f0_shift_in_cent is specified, the output pitch
             # will be shifted as a part of post-processing
             multistream_features = self.postprocess_acoustic(
                 acoustic_features=acoustic_features,
-                duration_modified_labels=duration_modified_labels_seg,
+                duration_modified_labels=duration_modified_labels,
                 trajectory_smoothing=trajectory_smoothing,
                 trajectory_smoothing_cutoff=trajectory_smoothing_cutoff,
                 trajectory_smoothing_cutoff_f0=trajectory_smoothing_cutoff_f0,
@@ -493,676 +527,49 @@ class SimpleEnunuServer(SPSVS):
                 f0_shift_in_cent=-style_shift * 100,
             )
 
-            if len(multistream_features) >= 4:
-                mgc, lf0, vuv, bap = multistream_features
-                lf0 = interp1d(lf0, kind="cubic")
-                # Remove high-frequency components of mgc/bap
-                # NOTE: It seems to be effective to suppress artifacts of GAN-based post-filtering
-                if trajectory_smoothing:
-                    modfs = int(1 / 0.005)
-                    for d in range(mgc.shape[1]):
-                        mgc[:, d] = lowpass_filter(
-                            mgc[:, d], modfs, cutoff=trajectory_smoothing_cutoff
-                        )
-                    for d in range(bap.shape[1]):
-                        bap[:, d] = lowpass_filter(
-                            bap[:, d], modfs, cutoff=trajectory_smoothing_cutoff
-                        )
 
+            data,f0, spectrogram, aperiodicity = [],[],[],[]
+            params = len(multistream_features)
+            if params >= 4:
+                mgc, lf0, vuv, bap = multistream_features
                 # Generate WORLD parameters
                 f0, spectrogram, aperiodicity = gen_world_params(
                     mgc, lf0, vuv, bap, self.sample_rate, vuv_threshold=vuv_threshold
                 )
-            elif len(multistream_features) == 3:
-                mel,lf0,vuv = multistream_features
-                f0 = np.exp(lf0)
-            
-
-            
-
-
-            # csvファイルとしてf0の行列を出力
-            for path, array in (
-                (self.path_f0, f0),
-                (self.path_spcetrogram, spectrogram),
-                (self.path_aperiodicity, aperiodicity),
-                (self.path_acoustic, acoustic_features)
-            ):
-                if array is not None:
-                    np.savetxt(
-                        path,
-                        array,
-                        fmt='%.16f',
-                        delimiter=','
-                    )
-
-    
-    def svs(
-        self,
-        labels,
-        vocoder_type='world',
-        post_filter_type='gv',
-        trajectory_smoothing=True,
-        trajectory_smoothing_cutoff=50,
-        trajectory_smoothing_cutoff_f0=20,
-        vuv_threshold=0.5,
-        style_shift=0,
-        force_fix_vuv=False,
-        fill_silence_to_rest=False,
-        dtype=np.int16,
-        peak_norm=False,
-        loudness_norm=False,
-        target_loudness=-20,
-        segmented_synthesis=False,
-        **kwargs
-    ):
-        """Synthesize waveform from HTS labels.
-        Args:
-            labels (nnmnkwii.io.hts.HTSLabelFile): HTS labels
-            vocoder_type (str): Vocoder type. One of ``world``, ``pwg`` or ``usfgan``.
-                If ``auto`` is specified, the vocoder is automatically selected.
-            post_filter_type (str): Post-filter type. ``merlin``, ``gv`` or ``nnsvs``
-                is supported.
-            trajectory_smoothing (bool): Whether to smooth acoustic feature trajectory.
-            trajectory_smoothing_cutoff (int): Cutoff frequency for trajectory smoothing.
-            trajectory_smoothing_cutoff_f0 (int): Cutoff frequency for trajectory
-                smoothing of f0.
-            vuv_threshold (float): Threshold for VUV.
-            style_shift (int): style shift parameter
-            force_fix_vuv (bool): Whether to correct VUV.
-            fill_silence_to_rest (bool): Fill silence to rest frames.
-            dtype (np.dtype): Data type of the output waveform.
-            peak_norm (bool): Whether to normalize the waveform by peak value.
-            loudness_norm (bool): Whether to normalize the waveform by loudness.
-            target_loudness (float): Target loudness in dB.
-            segmneted_synthesis (bool): Whether to use segmented synthesis.
-        """
-        start_time = time.time()
-        vocoder_type = vocoder_type.lower()
-        if vocoder_type not in ["world", "pwg", "usfgan", "auto"]:
-            raise ValueError(f"Unknown vocoder type: {vocoder_type}")
-        if post_filter_type not in ["merlin", "nnsvs", "gv", "none"]:
-            raise ValueError(f"Unknown post-filter type: {post_filter_type}")
-
-        # Predict timinigs
-        duration_modified_labels = self.predict_timing(labels)
+                f0s.append(f0)
+                spectrograms.append(spectrogram)
+                aperiodicitys.append(aperiodicity)
+            elif params == 3:
+                data = self.predict_waveform(
+                    multistream_features=multistream_features,
+                    vocoder_type=vocoder_type,
+                    vuv_threshold=vuv_threshold,
+                )
+                data = data.astype(np.double)
+                datas.append(data)
         
-        
-        # NOTE: segmented synthesis is not well tested. There MUST be better ways
-        # to do this.
-        if segmented_synthesis:
-            self.logger.warning(
-                "Segmented synthesis is not well tested. Use it on your own risk."
-            )
-            # NOTE: ここsegment_labels が nnsvs の中の関数にあるので呼び出せるように改造済み
-            duration_modified_labels_segs = nnsvs.io.hts.segment_labels(
-                duration_modified_labels,
-                # the following parameters are based on experiments in the NNSVS's paper
-                # tuned with Namine Ritsu's database
-                silence_threshold=0.1,
-                min_duration=5.0,
-                force_split_threshold=5.0,
-            )
-            from tqdm.auto import tqdm
+        if params == 3:
+            data = np.concatenate(datas, axis=0).reshape(-1)
+            f0, spectrogram, aperiodicity = pyworld.wav2world(data, self.sample_rate)
+            f0 = self.interp1d(f0=f0,kind=kind)
         else:
-            duration_modified_labels_segs = [duration_modified_labels]
+            f0 = np.concatenate(f0s, axis=0).reshape(-1)
+            spectrogram = np.concatenate(spectrograms, axis=0).reshape(-1)
+            aperiodicity = np.concatenate(aperiodicitys, axis=0).reshape(-1)
 
-            def tqdm(x, **kwargs):
-                return x
-
-        
-
-        hts_frame_shift = int(self.config.frame_period * 1e4)
-        labels.frame_shift = hts_frame_shift
-        num_frames = int(labels.num_frames(frame_shift=hts_frame_shift))
-        def tqdm(x, **kwargs):
-                return x
-        i = 0
-        for duration_modified_labels_seg in tqdm(
-            duration_modified_labels_segs,
-            desc="[segment]",
-            total=len(duration_modified_labels_segs),
+        # csvファイルとしてf0の行列を出力
+        for path, array in (
+            (self.path_f0, f0),
+            (self.path_spcetrogram, spectrogram),
+            (self.path_aperiodicity, aperiodicity),
         ):
-
-
-            duration_modified_labels_seg.frame_shift = hts_frame_shift
-
-            # Predict acoustic features
-            # NOTE: if non-zero pre_f0_shift_in_cent is specified, the input pitch
-            # will be shifted before running the acoustic model
-            acoustic_features = self.predict_acoustic(
-                duration_modified_labels_seg,
-                f0_shift_in_cent=style_shift * 100,
-            )
-            # Post-processing for acoustic features
-            # NOTE: if non-zero post_f0_shift_in_cent is specified, the output pitch
-            # will be shifted as a part of post-processing
-            multistream_features = self.postprocess_acoustic(
-                acoustic_features=acoustic_features,
-                duration_modified_labels=duration_modified_labels_seg,
-                trajectory_smoothing=trajectory_smoothing,
-                trajectory_smoothing_cutoff=trajectory_smoothing_cutoff,
-                trajectory_smoothing_cutoff_f0=trajectory_smoothing_cutoff_f0,
-                force_fix_vuv=force_fix_vuv,
-                fill_silence_to_rest=fill_silence_to_rest,
-                f0_shift_in_cent=-style_shift * 100,
-            )
-
-            if len(multistream_features) >= 4:
-                (mgc, lf0, vuv, bap) = multistream_features
-                multistream_features = self.load_world_param(multistream_features)
-                (mgc_, lf0_, vuv_, bap_) = multistream_features
-                for a,b,c in ((mgc,mgc_,"mgc"),(lf0,lf0_,"lf0"),(vuv,vuv_,"vuv"),(bap,bap_,"bap")):
-                    f = open(f'H:\\OpenUtau\\OpenUtau\\OpenUtau\\bin\\Debug\\net6.0-windows\\Cache\\{c}.txt', 'w', encoding='UTF-8')
-                    f.write(f"a:={len(a)},b:={len(b)}\n\n")
-                    for num in range(len(a)):
-                        f.write(f"a:{num}={a[num]},b:{num}={b[num]}\n")
-                    f.close()
-
-            elif len(multistream_features) == 3:
-                mel,lf0,vuv = split_streams(acoustic_features,self.acoustic_config.stream_sizes)
-                if not isfile(self.path_f0):
-                    f0 = np.loadtxt(self.path_f0, delimiter=',', dtype=np.float64)
-                    # lf0パラメータの生成
-                    lf0 = f0[:, np.newaxis].copy()
-                    nonzero_indices = np.nonzero(lf0)
-                    lf0[nonzero_indices] = np.log(f0[:, np.newaxis][nonzero_indices])
-                    # F0 -> continuous F0
-                    lf0 = interp1d(lf0, kind="slinear")
-                multistream_features = mel,lf0,vuv
-
-            wavs = []
-            # Generate waveform by vocoder
-            wav = self.predict_waveform(
-                multistream_features=multistream_features,
-                vocoder_type=vocoder_type,
-                vuv_threshold=vuv_threshold,
-            )
-            wavs.append(wav)
-            i = i + 1
-
-        # Concatenate segmented waveforms
-        wav = np.concatenate(wavs, axis=0).reshape(-1)
-
-        # Post-processing for the output waveform
-        wav = self.postprocess_waveform(
-            wav,
-            dtype=dtype,
-            peak_norm=peak_norm,
-            loudness_norm=loudness_norm,
-            target_loudness=target_loudness,
-        )
-        self.logger.info(f"Total time: {time.time() - start_time:.3f} sec")
-        RT = (time.time() - start_time) / (len(wav) / self.sample_rate)
-        self.logger.info(f"Total real-time factor: {RT:.3f}")
-        return wav, self.sample_rate
-
-def run_timing(config: DictConfig, temp_dir: str ,engine: SimpleEnunuServer):
-    path_temp_ust, path_temp_table, \
-    path_full_score, path_mono_score, \
-    path_full_timing, path_mono_timing, \
-    path_acoustic, path_f0, path_spectrogram, \
-    path_aperiodicity, path_question = get_paths(temp_dir)
-
-    # フルラベル(score)生成----------------------------------------------------------
-    converter = get_standard_function_config(config, 'ust_converter')
-    # フルラベル生成をしない場合
-    if converter is None:
-        pass
-    # ENUNUの組み込み機能でUST→LAB変換をする場合
-    elif converter == 'built-in':
-        print(f'{datetime.now()} : converting UST to score with built-in function')
-        enulib.utauplugin2score.utauplugin2score(
-            path_temp_ust,
-            path_temp_table,
-            path_full_score,
-            strict_sinsy_style=False
-        )
-        # full_score から mono_score を生成
-        enulib.common.full2mono(path_full_score, path_mono_score)
-    # 外部ソフトでUST→LAB変換をする場合
-    else:
-        print(
-            f'{datetime.now()} : converting UST to score with built-in function{converter}')
-        enulib.extensions.run_extension(
-            converter,
-            ust=path_temp_ust,
-            table=path_temp_table,
-            full_score=path_full_score,
-            mono_score=path_mono_score
-        )
-
-    # フルラベル(timing) を生成 score.full -> timing.full-----------------
-    calculator = get_standard_function_config(config, 'timing_calculator')
-    # duration計算をしない場合
-    if calculator is None:
-        print(f'{datetime.now()} : skipped acoustic calculation')
-    # ENUNUの組み込み機能で計算する場合
-    elif calculator == 'built-in':
-        print(f'{datetime.now()} : calculating timing with built-in function')
-        enulib.timing.score2timing(
-            config,
-            path_full_score,
-            path_full_timing
-        )
-        # フルラベルからモノラベルを生成
-        enulib.common.full2mono(path_full_timing, path_mono_timing)
-
-    #nnsvsで計算する場合
-    elif calculator == 'nnsvs':
-        
-        print(f'{datetime.now()} : calculate timings with nnsvs function')
-        
-        # フルラベルファイルを読み取る
-        logging.info('Loading LAB')
-        labels = hts.load(path_full_score)
-
-        path_mono_score,path_mono_timing,path_full_timing = engine.svs_timing(
-            labels=labels,
-            dtype=np.float32,
-            vocoder_type='auto',
-            post_filter_type='gv',
-            force_fix_vuv=True,
-            segmented_synthesis=True,
-        )
-    # 外部ソフトで計算する場合
-    else:
-        print(f'{datetime.now()} : calculating timing with {calculator}')
-        enulib.extensions.run_extension(
-            calculator,
-            ust=path_temp_ust,
-            table=path_temp_table,
-            full_score=path_full_score,
-            mono_score=path_mono_score,
-            full_timing=path_full_timing,
-            mono_timing=path_mono_timing
-        )
-    extension_list = get_extension_path_list(config, 'timing_editor')
-    if extension_list is not None:
-        # 複数ツールのすべてについて処理実施する
-        for path_extension in extension_list:
-            print(f'{datetime.now()} : editing timing with {path_extension}')
-            # 変更前のモノラベルを読んでおく
-            with open(path_mono_timing, encoding='utf-8') as f:
-                str_mono_old = f.read()
-            enulib.extensions.run_extension(
-                path_extension,
-                ust=path_temp_ust,
-                table=path_temp_table,
-                full_score=path_full_score,
-                mono_score=path_mono_score,
-                full_timing=path_full_timing,
-                mono_timing=path_mono_timing
-            )
-            # 変更後のモノラベルを読む
-            with open(path_mono_timing, encoding='utf-8') as f:
-                str_mono_new = f.read()
-            # モノラベルの時刻が変わっていたらフルラベルに転写して、
-            # そうでなければフルラベルの時刻をモノラベルに転写する。
-            # NOTE: 歌詞は編集していないという前提で処理する。
-            if enulib.extensions.str_has_been_changed(str_mono_old, str_mono_new):
-                enulib.extensions.merge_mono_time_change_to_full(
-                    path_mono_timing, path_full_timing)
-            else:
-                enulib.extensions.merge_full_time_change_to_mono(
-                    path_full_timing, path_mono_timing)
-                
-
-    return path_full_timing, path_mono_timing
-
-def run_acoustic(config: DictConfig, temp_dir: str,engine: SimpleEnunuServer):
-    path_temp_ust, path_temp_table, \
-        path_full_score, path_mono_score, \
-        path_full_timing, path_mono_timing, \
-        path_acoustic, path_f0, path_spectrogram, \
-        path_aperiodicity, path_question = get_paths(temp_dir)
-    
-    calculator = get_standard_function_config(config, 'acoustic_calculator')
-    # 計算をしない場合
-    if calculator is None:
-        print(f'{datetime.now()} : skipped acoustic calculation')
-    elif calculator == 'nnsvs':
-        print(f'{datetime.now()} : calculating acoustic with built-in function')
-
-        # フルラベルファイルを読み取る
-        logging.info('Loading LAB')
-        labels = hts.load(path_full_timing).round_()
-        
-        # acoustic のファイルから f0, spectrogram, aperiodicity のファイルを出力
-        engine.svs_acoustic(
-            labels=labels,
-            dtype=np.float32,
-            vocoder_type='auto',
-            post_filter_type='gv',
-            force_fix_vuv=True,
-            segmented_synthesis=False,
-        )
-    elif calculator == 'built-in':
-        print(
-            f'{datetime.now()} : calculating acoustic with built-in function')
-        # timing.full から acoustic.csv を作る。
-        enulib.acoustic.timing2acoustic(
-            config, path_full_timing, path_acoustic)
-        # acoustic のファイルから f0, spectrogram, aperiodicity のファイルを出力
-        enulib.world.acoustic2world(
-            config,
-            path_full_timing,
-            path_acoustic,
-            path_f0,
-            path_spectrogram,
-            path_aperiodicity
-        )
-    else:
-        print(
-            f'{datetime.now()} : calculating acoustic with {calculator}')
-        enulib.extensions.run_extension(
-            calculator,
-            ust=path_temp_ust,
-            table=path_temp_table,
-            full_score=path_full_score,
-            mono_score=path_mono_score,
-            full_timing=path_full_timing,
-            mono_timing=path_mono_timing,
-            acoustic=path_acoustic,
-            f0=path_f0,
-            spectrogram=path_spectrogram,
-            aperiodicity=path_aperiodicity
-        )
-
-    # 音響パラメータを加工: acoustic.csv -> acoustic.csv -------------------------
-    extension_list = get_extension_path_list(config, 'acoustic_editor')
-    if extension_list is not None:
-        for path_extension in extension_list:
-            print(f'{datetime.now()} : editing acoustic with {path_extension}')
-            enulib.extensions.run_extension(
-                path_extension,
-                ust=path_temp_ust,
-                table=path_temp_table,
-                full_score=path_full_score,
-                mono_score=path_mono_score,
-                full_timing=path_full_timing,
-                mono_timing=path_mono_timing,
-                acoustic=path_acoustic,
-                f0=path_f0,
-                spectrogram=path_spectrogram,
-                aperiodicity=path_aperiodicity
-            )
-
-
-    return path_acoustic, path_f0, path_spectrogram, path_aperiodicity
-
-
-def run_synthesizer(config: DictConfig, temp_dir: str,out_wav_path: str,engine: SimpleEnunuServer):
-    path_temp_ust, path_temp_table, \
-        path_full_score, path_mono_score, \
-        path_full_timing, path_mono_timing, \
-        path_acoustic, path_f0, path_spectrogram, \
-        path_aperiodicity, path_question = get_paths(temp_dir)
-
-    # WORLDを使って音声ファイルを生成: acoustic.csv -> <songname>.wav--------------
-    synthesizer = get_standard_function_config(config, 'wav_synthesizer')
-
-    # ここでは合成をしない場合
-    if synthesizer is None:
-        print(f'{datetime.now()} : skipped synthesizing WAV')
-
-    # 組み込まれたWORLDで合成する場合
-    elif synthesizer == 'vocoder':
-        print(f'{datetime.now()} : synthesizing WAV with nnsvs function')
-        # WAVファイル出力
-
-        # フルラベルファイルを読み取る
-        logging.info('Loading LAB')
-        labels = hts.load(path_full_score)
-
-        # 音声を生成する
-        logging.info('Generating WAV')
-        wav_data, sample_rate = engine.svs(
-            labels,
-            dtype=np.float32,
-            vocoder_type='auto',
-            post_filter_type='gv',
-            force_fix_vuv=True,
-            segmented_synthesis=False,
-        )
-
-        # wav出力のフォーマットを確認する
-        print(sample_rate)
-
-        wav_data = adjust_wav_gain_for_float32(wav_data)
-        wavfile.write(out_wav_path, rate=sample_rate, data=wav_data)
-
-    # 組み込まれたWORLDで合成する場合
-    elif synthesizer == 'built-in':
-        print(f'{datetime.now()} : synthesizing WAV with built-in function')
-        # WAVファイル出力
-        enulib.world.world2wav(
-            config,
-            path_f0,
-            path_spectrogram,
-            path_aperiodicity,
-            out_wav_path
-        )
-
-    # 別途指定するソフトで合成する場合
-    else:
-        print(f'{datetime.now()} : synthesizing WAV with {synthesizer}')
-        enulib.extensions.run_extension(
-            synthesizer,
-            ust=path_temp_ust,
-            table=path_temp_table,
-            full_score=path_full_score,
-            mono_score=path_mono_score,
-            full_timing=path_full_timing,
-            mono_timing=path_mono_timing,
-            acoustic=path_acoustic,
-            f0=path_f0,
-            spectrogram=path_spectrogram,
-            aperiodicity=path_aperiodicity
-        )
-
-    # 音声ファイルを加工: <songname>.wav -> <songname>.wav
-    extension_list = get_extension_path_list(config, 'wav_editor')
-    if extension_list is not None:
-        for path_extension in extension_list:
-            print(f'{datetime.now()} : editing WAV with {path_extension}')
-            enulib.extensions.run_extension(
-                path_extension,
-                ust=path_temp_ust,
-                table=path_temp_table,
-                full_score=path_full_score,
-                mono_score=path_mono_score,
-                full_timing=path_full_timing,
-                mono_timing=path_mono_timing,
-                acoustic=path_acoustic,
-                f0=path_f0,
-                spectrogram=path_spectrogram,
-                aperiodicity=path_aperiodicity
-            )
-
-    # print(f'{datetime.now()} : converting LAB to JSON')
-    # hts2json(path_full_score, path_json)
-
-    return out_wav_path
-
-
-
-def setup(path_plugin: str):
-    ""
-    # USTの形式のファイルでなければエラー
-    if not path_plugin.endswith('.tmp') or path_plugin.endswith('.ust'):
-        raise ValueError('Input file must be UST or TMP(plugin).')
-    # UTAUの一時ファイルに書いてある設定を読み取る
-    logging.info('reading settings in TMP')
-    path_ust, voice_dir, _ = get_project_path(path_plugin)
-
-    # ENUNU<1.0.0 向けの構成のモデルな場合
-    if exists(join(voice_dir, 'enuconfig.yaml')):
-        logging.info(
-            'Regacy ENUNU model is selected. Converting it for the compatibility...'
-        )
-        try:
-                with open(join(voice_dir, 'enuconfig.yaml'), encoding='utf-8') as f:
-                # configファイルを読み取る
-                    print(f'{datetime.now()} : reading enuconfig')
-                    config = DictConfig(OmegaConf.load(f))
-                model_dir = join(voice_dir, 'model')
-                makedirs(model_dir, exist_ok=True)
-                print('----------------------------------------------')
-                wrapped_enunu2nnsvs(voice_dir, model_dir,config)
-                print('\n----------------------------------------------')
-                logging.info('Converted.')
-                table_path = config.table_path
-        except Exception as e:
-            print(e)
-    # ENUNU=>1.0.0 または SimpleEnunu 用に作成されたNNSVSモデルの場合
-    elif packed_model_exists(join(voice_dir, 'model')):
-        model_dir = join(voice_dir, 'model')
-        table_path = find_table(model_dir)
-        try:
-            with open(join(model_dir, 'config.yaml'), encoding='utf-8') as f:
-            # configファイルを読み取る
-                print(f'{datetime.now()} : reading enuconfig')
-                config = DictConfig(OmegaConf.load(f))
-                config = set_config(config,model_dir)
-                logging.info('Converted.')
-        except Exception as e:
-            print(e)
-    # ENUNU 用ではない通常のNNSVSモデルの場合
-    elif packed_model_exists(voice_dir):
-        model_dir = voice_dir
-        table_path = find_table(model_dir)
-        try:
-            with open(join(model_dir, 'config.yaml'), encoding='utf-8') as f:
-            # configファイルを読み取る
-                print(f'{datetime.now()} : reading enuconfig')
-                config = DictConfig(OmegaConf.load(f))
-                config = set_config(config,model_dir)
-                logging.info('Converted.')
-        except Exception as e:
-            print(e)
-        logging.warning(
-            'NNSVS model is selected. This model might be not ready for ENUNU.')
-
-    # configファイルがあるか調べて、なければ例外処理
-    else:
-        raise Exception('UTAU音源選択でENUNU用モデルを指定してください。')
-    assert model_dir
-    assert table_path
-
-    # カレントディレクトリを音源フォルダに変更する
-    chdir(voice_dir)
-
-    # 日付時刻を取得
-    str_now = datetime.now().strftime('%Y%m%d_%H%M%S')
-
-    # 入出力パスを設定する
-    if path_ust is not None:
-        songname = splitext(basename(path_ust))[0]
-        out_dir = dirname(path_ust)
-        temp_dir = join(out_dir, f'{songname}_enutemp')
-        path_wav = abspath(join(out_dir, f'{songname}__{str_now}.wav'))
-    # WAV出力パス指定なしかつUST未保存の場合
-    else:
-        logging.info('USTが保存されていないので一時フォルダにWAV出力します。')
-        songname = f'temp__{str_now}'
-        out_dir = mkdtemp(prefix='enunu-')
-        temp_dir = join(out_dir, f'{songname}_enutemp')
-        path_wav = abspath(join(out_dir, f'{songname}__{str_now}.wav'))
-    makedirs(temp_dir, exist_ok=True)
-
-    # 各種出力ファイルのパスを設定
-    # path_plugin = path_plugin
-    path_temp_ust, path_temp_table, \
-    path_full_score, path_mono_score, \
-    path_full_timing, path_mono_timing, \
-    path_acoustic, path_f0, path_spectrogram, \
-    path_aperiodicity, path_question = get_paths(temp_dir)
-    
-
-
-    # USTを一時フォルダに複製
-    print(f'{datetime.now()} : copying UST')
-    copy(path_plugin, path_temp_ust)
-    print(f'{datetime.now()} : copying Table')
-    copy(table_path, path_temp_table)
-
-    # モデルを読み取る
-    logging.info('Loading models')
-    engine = SimpleEnunuServer(
-    model_dir,temp_dir, device='cuda' if torch.cuda.is_available() else 'cpu')
-    engine.set_paths(temp_dir=temp_dir)
-
-    
-
-
-
-
-
-    
-    return config, temp_dir,engine
-
-
-class SimpleEnunu(SPSVS):
-    """SimpleEnunuで合成するとき用に、外部ソフトでタイミング補正ができるようにする。
-
-    Args:
-        model_dir (str): NNSVSのモデルがあるフォルダ
-        device (str): 'cuda' or 'cpu'
-    """
-
-    def __init__(self,
-                 model_dir: str,
-                 device='cuda' if torch.cuda.is_available() else 'cpu',
-                 verbose=0,
-                 **kwargs):
-        super().__init__(model_dir, device=device, verbose=verbose, **kwargs)
-        # self.voice_dir = None
-        # self.path_plugin = None
-        # self.path_ust = None
-        self.path_full_score = None
-        self.path_mono_score = None
-        self.path_full_timing = None
-        self.path_mono_timing = None
-        # self.path_wav = None
-
-    def set_paths(self, temp_dir, songname):
-        """ファイル入出力のPATHを設定する
-        """
-
-        self.path_full_score = join(temp_dir, f'{songname}_score.full')
-        self.path_mono_score = join(temp_dir, f'{songname}_score.lab')
-        self.path_full_timing = join(temp_dir, f'{songname}_timing.full')
-        self.path_mono_timing = join(temp_dir, f'{songname}_timing.lab')
-
-    def edit_timing(self, duration_modified_labels):
-        """外部ツールでタイミング補正する
-        """
-        # タイミング補正ツールが指定されていない時はskip
-        if 'extensions' not in self.config:
-            return duration_modified_labels
-        if self.config.extensions.get('timing_editor') is None:
-            return duration_modified_labels
-        # 外部ツールでmono_timingを編集
-        self.logger.info(
-            'Editing timing with %s',
-            self.config.extensions.timing_editor
-        )
-        enulib.extensions.run_extension(
-            self.config.extensions.timing_editor,
-            full_score=self.path_full_score,
-            mono_score=self.path_mono_score,
-            full_timing=self.path_full_timing,
-            mono_timing=self.path_mono_timing
-        )
-        # mono_timing の時刻情報を full_timing に移植
-        enulib.extensions.merge_mono_time_change_to_full(
-            self.path_mono_timing,
-            self.path_full_timing
-        )
-        # 編集後のfull_timing を読み取る
-        duration_modified_labels = hts.load(self.path_full_timing).round_()
-        return duration_modified_labels
+            if array is not None:
+                np.savetxt(
+                    path,
+                    array,
+                    fmt='%.16f',
+                    delimiter=','
+                )
 
     
     def svs(
@@ -1310,6 +717,382 @@ class SimpleEnunu(SPSVS):
         self.logger.info(f"Total real-time factor: {RT:.3f}")
         return wav, self.sample_rate
 
+def run_timing(config: DictConfig, temp_dir: str ,engine: SimpleEnunuServer):
+    path_temp_ust, path_temp_table, \
+    path_full_score, path_mono_score, \
+    path_full_timing, path_mono_timing, \
+    path_acoustic, path_f0, path_spectrogram, \
+    path_aperiodicity, temp_path_question = get_paths(temp_dir)
+
+    # フルラベル(score)生成----------------------------------------------------------
+    converter = get_standard_function_config(config, 'ust_converter')
+    # フルラベル生成をしない場合
+    if converter is None:
+        pass
+    # ENUNUの組み込み機能でUST→LAB変換をする場合
+    elif converter == 'built-in':
+        print(f'{datetime.now()} : converting UST to score with built-in function')
+        enulib.utauplugin2score.utauplugin2score(
+            path_temp_ust,
+            path_temp_table,
+            path_full_score,
+            strict_sinsy_style=False
+        )
+        # full_score から mono_score を生成
+        enulib.common.full2mono(path_full_score, path_mono_score)
+    # 外部ソフトでUST→LAB変換をする場合
+    else:
+        print(
+            f'{datetime.now()} : converting UST to score with built-in function{converter}')
+        enulib.extensions.run_extension(
+            converter,
+            ust=path_temp_ust,
+            table=path_temp_table,
+            full_score=path_full_score,
+            mono_score=path_mono_score
+        )
+
+    # フルラベル(timing) を生成 score.full -> timing.full-----------------
+    calculator = get_standard_function_config(config, 'timing_calculator')
+    # duration計算をしない場合
+    if calculator is None:
+        print(f'{datetime.now()} : skipped acoustic calculation')
+    # ENUNUの組み込み機能で計算する場合
+    elif calculator == 'built-in':
+        print(f'{datetime.now()} : calculating timing with built-in function')
+        enulib.timing.score2timing(
+            config,
+            path_full_score,
+            path_full_timing
+        )
+        # フルラベルからモノラベルを生成
+        enulib.common.full2mono(path_full_timing, path_mono_timing)
+
+    #nnsvsで計算する場合
+    elif calculator == 'nnsvs':
+        
+        print(f'{datetime.now()} : calculate timings with nnsvs function')
+        
+        # フルラベルファイルを読み取る
+        logging.info('Loading LAB')
+        labels = hts.load(path_full_score)
+
+        path_mono_score,path_mono_timing,path_full_timing = engine.svs_timing(
+            labels=labels,
+            dtype=np.float32,
+            vocoder_type='auto',
+            post_filter_type='gv',
+            force_fix_vuv=True,
+            segmented_synthesis=True,
+        )
+    # 外部ソフトで計算する場合
+    else:
+        print(f'{datetime.now()} : calculating timing with {calculator}')
+        enulib.extensions.run_extension(
+            calculator,
+            ust=path_temp_ust,
+            table=path_temp_table,
+            full_score=path_full_score,
+            mono_score=path_mono_score,
+            full_timing=path_full_timing,
+            mono_timing=path_mono_timing
+        )
+    extension_list = get_extension_path_list(config, 'timing_editor')
+    if extension_list is not None:
+        # 複数ツールのすべてについて処理実施する
+        for path_extension in extension_list:
+            print(f'{datetime.now()} : editing timing with {path_extension}')
+            # 変更前のモノラベルを読んでおく
+            with open(path_mono_timing, encoding='utf-8') as f:
+                str_mono_old = f.read()
+            enulib.extensions.run_extension(
+                path_extension,
+                ust=path_temp_ust,
+                table=path_temp_table,
+                full_score=path_full_score,
+                mono_score=path_mono_score,
+                full_timing=path_full_timing,
+                mono_timing=path_mono_timing
+            )
+            # 変更後のモノラベルを読む
+            with open(path_mono_timing, encoding='utf-8') as f:
+                str_mono_new = f.read()
+            # モノラベルの時刻が変わっていたらフルラベルに転写して、
+            # そうでなければフルラベルの時刻をモノラベルに転写する。
+            # NOTE: 歌詞は編集していないという前提で処理する。
+            if enulib.extensions.str_has_been_changed(str_mono_old, str_mono_new):
+                enulib.extensions.merge_mono_time_change_to_full(
+                    path_mono_timing, path_full_timing)
+            else:
+                enulib.extensions.merge_full_time_change_to_mono(
+                    path_full_timing, path_mono_timing)
+                
+
+    return path_full_timing, path_mono_timing
+
+def run_acoustic(config: DictConfig, temp_dir: str,engine: SimpleEnunuServer):
+    path_temp_ust, path_temp_table, \
+    path_full_score, path_mono_score, \
+    path_full_timing, path_mono_timing, \
+    path_acoustic, path_f0, path_spectrogram, \
+    path_aperiodicity, temp_path_question = get_paths(temp_dir)
+    
+    calculator = get_standard_function_config(config, 'acoustic_calculator')
+    # 計算をしない場合
+    if calculator is None:
+        print(f'{datetime.now()} : skipped acoustic calculation')
+    elif calculator == 'nnsvs':
+        print(f'{datetime.now()} : calculating acoustic with built-in function')
+
+        # フルラベルファイルを読み取る
+        logging.info('Loading LAB')
+        labels = hts.load(path_full_timing).round_()
+        
+        # acoustic のファイルから f0, spectrogram, aperiodicity のファイルを出力
+        kind = get_standard_function_config(config, 'pitch_curve_interpolation')
+        if kind is None:
+            kind = 'linear'
+        print(f'{datetime.now()} : pitch interpolation mode : {kind}')
+        
+        engine.svs_acoustic(
+            labels=labels,
+            dtype=np.float32,
+            vocoder_type='auto',
+            post_filter_type='gv',
+            force_fix_vuv=True,
+            segmented_synthesis=False,
+            kind=kind,
+        )
+    elif calculator == 'built-in':
+        print(
+            f'{datetime.now()} : calculating acoustic with built-in function')
+        # timing.full から acoustic.csv を作る。
+        enulib.acoustic.timing2acoustic(
+            config, path_full_timing, path_acoustic)
+        # acoustic のファイルから f0, spectrogram, aperiodicity のファイルを出力
+        enulib.world.acoustic2world(
+            config,
+            path_full_timing,
+            path_acoustic,
+            path_f0,
+            path_spectrogram,
+            path_aperiodicity
+        )
+    else:
+        print(
+            f'{datetime.now()} : calculating acoustic with {calculator}')
+        enulib.extensions.run_extension(
+            calculator,
+            ust=path_temp_ust,
+            table=path_temp_table,
+            full_score=path_full_score,
+            mono_score=path_mono_score,
+            full_timing=path_full_timing,
+            mono_timing=path_mono_timing,
+            acoustic=path_acoustic,
+            f0=path_f0,
+            spectrogram=path_spectrogram,
+            aperiodicity=path_aperiodicity
+        )
+
+    # 音響パラメータを加工: acoustic.csv -> acoustic.csv -------------------------
+    extension_list = get_extension_path_list(config, 'acoustic_editor')
+    if extension_list is not None:
+        for path_extension in extension_list:
+            print(f'{datetime.now()} : editing acoustic with {path_extension}')
+            enulib.extensions.run_extension(
+                path_extension,
+                ust=path_temp_ust,
+                table=path_temp_table,
+                full_score=path_full_score,
+                mono_score=path_mono_score,
+                full_timing=path_full_timing,
+                mono_timing=path_mono_timing,
+                acoustic=path_acoustic,
+                f0=path_f0,
+                spectrogram=path_spectrogram,
+                aperiodicity=path_aperiodicity
+            )
+
+
+    return path_acoustic, path_f0, path_spectrogram, path_aperiodicity
+
+
+def run_synthesizer(config: DictConfig, temp_dir: str,out_wav_path: str,engine: SimpleEnunuServer):
+    path_temp_ust, path_temp_table, \
+    path_full_score, path_mono_score, \
+    path_full_timing, path_mono_timing, \
+    path_acoustic, path_f0, path_spectrogram, \
+    path_aperiodicity, temp_path_question = get_paths(temp_dir)
+
+    # WORLDを使って音声ファイルを生成: acoustic.csv -> <songname>.wav--------------
+    synthesizer = get_standard_function_config(config, 'wav_synthesizer')
+
+    # ここでは合成をしない場合
+    if synthesizer is None:
+        print(f'{datetime.now()} : skipped synthesizing WAV')
+
+    elif synthesizer == 'built-in':
+        print(f'{datetime.now()} : synthesizing WAV with built-in function')
+        # WAVファイル出力
+        enulib.world.world2wav(
+            config,
+            path_f0,
+            path_spectrogram,
+            path_aperiodicity,
+            out_wav_path
+        )
+
+    # 別途指定するソフトで合成する場合
+    else:
+        print(f'{datetime.now()} : synthesizing WAV with {synthesizer}')
+        enulib.extensions.run_extension(
+            synthesizer,
+            ust=path_temp_ust,
+            table=path_temp_table,
+            full_score=path_full_score,
+            mono_score=path_mono_score,
+            full_timing=path_full_timing,
+            mono_timing=path_mono_timing,
+            acoustic=path_acoustic,
+            f0=path_f0,
+            spectrogram=path_spectrogram,
+            aperiodicity=path_aperiodicity
+        )
+
+    # 音声ファイルを加工: <songname>.wav -> <songname>.wav
+    extension_list = get_extension_path_list(config, 'wav_editor')
+    if extension_list is not None:
+        for path_extension in extension_list:
+            print(f'{datetime.now()} : editing WAV with {path_extension}')
+            enulib.extensions.run_extension(
+                path_extension,
+                ust=path_temp_ust,
+                table=path_temp_table,
+                full_score=path_full_score,
+                mono_score=path_mono_score,
+                full_timing=path_full_timing,
+                mono_timing=path_mono_timing,
+                acoustic=path_acoustic,
+                f0=path_f0,
+                spectrogram=path_spectrogram,
+                aperiodicity=path_aperiodicity
+            )
+
+    # print(f'{datetime.now()} : converting LAB to JSON')
+    # hts2json(path_full_score, path_json)
+
+    return out_wav_path
+
+
+
+def setup(path_plugin: str):
+    ""
+    # USTの形式のファイルでなければエラー
+    if not path_plugin.endswith('.tmp') or path_plugin.endswith('.ust'):
+        raise ValueError('Input file must be UST or TMP(plugin).')
+    # UTAUの一時ファイルに書いてある設定を読み取る
+    logging.info('reading settings in TMP')
+    path_ust, voice_dir, _ = get_project_path(path_plugin)
+
+    # ENUNU<1.0.0 向けの構成のモデルな場合
+    if exists(join(voice_dir, 'enuconfig.yaml')):
+        logging.info(
+            'Regacy ENUNU model is selected. Converting it for the compatibility...'
+        )
+        try:
+                with open(join(voice_dir, 'enuconfig.yaml'), encoding='utf-8') as f:
+                # configファイルを読み取る
+                    print(f'{datetime.now()} : reading enuconfig')
+                    config = DictConfig(OmegaConf.load(f))
+                model_dir = join(voice_dir, 'model')
+                makedirs(model_dir, exist_ok=True)
+                print('----------------------------------------------')
+                wrapped_enunu2nnsvs(voice_dir, model_dir,config)
+                print('\n----------------------------------------------')
+                logging.info('Converted.')
+                table_path = config.table_path
+        except Exception as e:
+            print(e)
+    # ENUNU=>1.0.0 または SimpleEnunu 用に作成されたNNSVSモデルの場合
+    elif packed_model_exists(join(voice_dir, 'model')):
+        model_dir = join(voice_dir, 'model')
+        table_path = find_table(model_dir)
+        try:
+            with open(join(model_dir, 'config.yaml'), encoding='utf-8') as f:
+            # configファイルを読み取る
+                print(f'{datetime.now()} : reading enuconfig')
+                config = DictConfig(OmegaConf.load(f))
+                config = set_config(config,model_dir)
+                logging.info('Converted.')
+        except Exception as e:
+            print(e)
+    # ENUNU 用ではない通常のNNSVSモデルの場合
+    elif packed_model_exists(voice_dir):
+        model_dir = voice_dir
+        table_path = find_table(model_dir)
+        try:
+            with open(join(model_dir, 'config.yaml'), encoding='utf-8') as f:
+            # configファイルを読み取る
+                print(f'{datetime.now()} : reading enuconfig')
+                config = DictConfig(OmegaConf.load(f))
+                config = set_config(config,model_dir)
+                logging.info('Converted.')
+        except Exception as e:
+            print(e)
+        logging.warning(
+            'NNSVS model is selected. This model might be not ready for ENUNU.')
+
+    # configファイルがあるか調べて、なければ例外処理
+    else:
+        raise Exception('UTAU音源選択でENUNU用モデルを指定してください。')
+    assert model_dir
+    assert table_path
+
+    # カレントディレクトリを音源フォルダに変更する
+    chdir(voice_dir)
+
+    # 日付時刻を取得
+    str_now = datetime.now().strftime('%Y%m%d_%H%M%S')
+
+    # 入出力パスを設定する
+    if path_ust is not None:
+        songname = splitext(basename(path_ust))[0]
+        out_dir = dirname(path_ust)
+        temp_dir = join(out_dir, f'{songname}_enutemp')
+        path_wav = abspath(join(out_dir, f'{songname}__{str_now}.wav'))
+    # WAV出力パス指定なしかつUST未保存の場合
+    else:
+        logging.info('USTが保存されていないので一時フォルダにWAV出力します。')
+        songname = f'temp__{str_now}'
+        out_dir = mkdtemp(prefix='enunu-')
+        temp_dir = join(out_dir, f'{songname}_enutemp')
+        path_wav = abspath(join(out_dir, f'{songname}__{str_now}.wav'))
+    makedirs(temp_dir, exist_ok=True)
+
+    # 各種出力ファイルのパスを設定
+    # path_plugin = path_plugin
+    path_temp_ust, path_temp_table, \
+    path_full_score, path_mono_score, \
+    path_full_timing, path_mono_timing, \
+    path_acoustic, path_f0, path_spectrogram, \
+    path_aperiodicity, temp_path_question = get_paths(temp_dir)
+    
+
+    # USTを一時フォルダに複製
+    print(f'{datetime.now()} : copying UST')
+    copy(path_plugin, path_temp_ust)
+    print(f'{datetime.now()} : copying Table')
+    copy(table_path, path_temp_table)
+
+    # モデルを読み取る
+    logging.info('Loading models')
+    engine = SimpleEnunuServer(
+    model_dir,temp_dir, device='cuda' if torch.cuda.is_available() else 'cpu')
+    engine.set_paths(temp_dir=temp_dir)
+    
+    return config, temp_dir,engine
+
 
 def main(path_plugin: str, path_wav: Union[str, None] = None, play_wav=True) -> str:
     """
@@ -1380,7 +1163,7 @@ def main(path_plugin: str, path_wav: Union[str, None] = None, play_wav=True) -> 
 
     # モデルを読み取る
     logging.info('Loading models')
-    engine = SimpleEnunu(
+    engine = SimpleEnunuServer(
         model_dir, device='cuda' if torch.cuda.is_available() else 'cpu')
     engine.set_paths(temp_dir=temp_dir, songname=songname)
 
