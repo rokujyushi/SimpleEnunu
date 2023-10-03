@@ -60,7 +60,7 @@ def acoustic(path_ust: str):
         'path_aperiodicity': path_aperiodicity,
     }
 
-def vocoder(path_ust: str,out_wav_path: str):
+def synthe(path_ust: str,out_wav_path: str):
     config, temp_dir,engine = enunu_steps.setup(path_ust)
     
     path_full_timing, path_mono_timing = enunu_steps.run_timing(config, temp_dir,engine)
@@ -104,8 +104,8 @@ def main():
                 response['result'] = timing(request[1])
             elif request[0] == 'acoustic':
                 response['result'] = acoustic(request[1])
-            elif request[0] == 'vocoder':
-                response['result'] = vocoder(request[1],request[2])
+            elif request[0] == 'synthe':
+                response['result'] = synthe(request[1],request[2])
             else:
                 raise NotImplementedError('unexpected command %s' % request[0])
         except Exception as e:
