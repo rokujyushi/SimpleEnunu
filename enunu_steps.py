@@ -25,6 +25,7 @@ import yaml
 from nnmnkwii.io import hts
 from scipy.io import wavfile
 from scipy import interpolate
+from scipy.fftpack import fft, ifft
 from omegaconf import DictConfig, OmegaConf
 
 # scikit-learn で警告が出るのを無視
@@ -41,22 +42,6 @@ logging.getLogger('simple_enunu')
 
 # ENUNUのフォルダ直下にあるフォルダやファイルをimportできるようにする
 sys.path.append(dirname(__file__))
-import enulib
-
-try:
-    import torch
-except ModuleNotFoundError:
-    print('----------------------------------------------------------')
-    print('初回起動ですね。')
-    print('PC環境に合わせてPyTorchを自動インストールします。')
-    print('インストール完了までしばらくお待ちください。')
-    print('----------------------------------------------------------')
-#    enulib.install_torch.ltt_install_torch(sys.executable)
-    enulib.install_torch.pip_install_torch(abspath(sys.executable))
-    print('----------------------------------------------------------')
-    print('インストール成功しました。')
-    print('----------------------------------------------------------\n')
-    import torch
 
 # NNSVSをimportできるようにする
 if exists(join(dirname(__file__), 'nnsvs-master')):
@@ -65,6 +50,24 @@ elif exists(join(dirname(__file__), 'nnsvs')):
     sys.path.append(join(dirname(__file__), 'nnsvs'))
 else:
     logging.error('NNSVS directory is not found.')
+
+try:
+    import enulib
+    import torch
+except ModuleNotFoundError:
+    from enulib.install_torch import pip_install_torch
+    print('----------------------------------------------------------')
+    print('初回起動ですね。')
+    print('PC環境に合わせてPyTorchを自動インストールします。')
+    print('インストール完了までしばらくお待ちください。')
+    print('----------------------------------------------------------')
+#    enulib.install_torch.ltt_install_torch(sys.executable)
+    pip_install_torch(abspath(sys.executable))
+    print('----------------------------------------------------------')
+    print('インストール成功しました。')
+    print('----------------------------------------------------------\n')
+    import enulib
+    import torch
 
 import nnsvs  # pylint: disable=import-error
 from nnsvs.svs import SPSVS
@@ -109,7 +112,8 @@ def estimate_bit_depth(wav: np.ndarray) -> str:
         return 'int16'
     return 'float'
 
-def wrapped_enunu2nnsvs(voice_dir, out_dir,config):
+
+def wrapped_enunu2nnsvs(voice_dir, out_dir):
     """ENUNU用のディレクトリ構造のモデルをNNSVS用に再構築する。
     """
     # torch.save() の出力パスに日本語が含まれているとセーブできないので、一時フォルダを作ってそこに保存してから移動する。
@@ -117,11 +121,11 @@ def wrapped_enunu2nnsvs(voice_dir, out_dir,config):
         enunu2nnsvs.main(voice_dir, relpath(temp_dir))
         for path in listdir(temp_dir):
             move(join(temp_dir, path), join(out_dir, path))
-    copy(
+    with open(join(voice_dir, 'enuconfig.yaml'), encoding='utf-8') as f:
+        enuconfig = yaml.safe_load(f)
+    rename(
         join(out_dir, 'kana2phonemes.table'),
-        basename(config.table_path))
-    
-    return config
+        join(out_dir, basename(enuconfig['table_path'])))
 
 
 def packed_model_exists(voice_dir: str) -> bool:
@@ -169,7 +173,7 @@ def adjust_wav_gain_for_float32(wav: np.ndarray):
     # float
     else:
         return wav
-    
+
 
 
 def get_standard_function_config(config, key) -> Union[None, str]:
@@ -240,14 +244,32 @@ def set_config(config: DictConfig,model_dir: str,temp_dir: str):
     }
     ex_enconfig = OmegaConf.create(enconfigObj)
     config = OmegaConf.merge(config, ex_enconfig)
+
+    if config.get('extensions') is None:
+        config.extensions = {}
+    
+    if config.extensions.get('wav_synthesizer') is None:
+        config.extensions.wav_synthesizer = "acoustic"
+
+    if config.extensions.get('acoustic_calculator') is None:
+        config.extensions.acoustic_calculator = "nnsvs"
+
+    if config.extensions.get('timing_calculator') is None:
+        config.extensions.timing_calculator = "nnsvs"
+
+    if config.extensions.get('ust_converter') is None:
+        config.extensions.ust_converter = "built-in"
+    
     return config
 
 class SimpleEnunuServer(SPSVS):
     """SimpleEnunuで合成するとき用に、外部ソフトでタイミング補正ができるようにする。
+
     Args:
         model_dir (str): NNSVSのモデルがあるフォルダ
         device (str): 'cuda' or 'cpu'
     """
+
     def __init__(self,
             model_dir: str,
             temp_dir: str,
@@ -309,6 +331,19 @@ class SimpleEnunuServer(SPSVS):
         # 編集後のfull_timing を読み取る
         duration_modified_labels = hts.load(self.path_full_timing).round_()
         return duration_modified_labels
+    
+    # ログメルスペクトルを指数変換してメルスペクトルを得る
+    def inverse_log_mel(log_mel_spectrum):
+        return np.exp(log_mel_spectrum)
+    
+    # メル逆変換
+    def inverse_mel_filter_bank(mel_spectrum, mel_filter_bank):
+        linear_spectrum = np.dot(np.linalg.pinv(mel_filter_bank), mel_spectrum)
+        return linear_spectrum
+    
+    # 逆FFT
+    def inverse_fft(linear_spectrum):
+        return np.abs(ifft(linear_spectrum))
 
     def svs_timing(
         self,
@@ -361,13 +396,14 @@ class SimpleEnunuServer(SPSVS):
         # NOTE: ここにタイミング補正のための割り込み処理を追加-----------
         # mono_score を出力
         with open(self.path_mono_score, 'w', encoding='utf-8') as f:
-            f.write(str(nnsvs.io.hts.full_to_mono(duration_modified_labels)))
+            f.write(str(nnsvs.io.hts.full_to_mono(labels)))
         # mono_timing を出力
         with open(self.path_mono_timing, 'w', encoding='utf-8') as f:
             f.write(str(nnsvs.io.hts.full_to_mono(duration_modified_labels)))
         # full_timing を出力
         with open(self.path_full_timing, 'w', encoding='utf-8') as f:
             f.write(str(duration_modified_labels))
+        duration_modified_labels = self.edit_timing(duration_modified_labels)
 
 
         return self.path_mono_score,self.path_mono_timing,self.path_full_timing
@@ -459,16 +495,6 @@ class SimpleEnunuServer(SPSVS):
         
         # 編集後のfull_timing を読み取る
         duration_modified_labels = self.predict_timing(labels)
-        # NOTE: ここにタイミング補正のための割り込み処理を追加-----------
-        # mono_score を出力
-        with open(self.path_mono_score, 'w', encoding='utf-8') as f:
-            f.write(str(nnsvs.io.hts.full_to_mono(duration_modified_labels)))
-        # mono_timing を出力
-        with open(self.path_mono_timing, 'w', encoding='utf-8') as f:
-            f.write(str(nnsvs.io.hts.full_to_mono(duration_modified_labels)))
-        # full_timing を出力
-        with open(self.path_full_timing, 'w', encoding='utf-8') as f:
-            f.write(str(duration_modified_labels))
         
         # NOTE: segmented synthesis is not well tested. There MUST be better ways
         # to do this.
@@ -540,6 +566,22 @@ class SimpleEnunuServer(SPSVS):
                 spectrograms.append(spectrogram)
                 aperiodicitys.append(aperiodicity)
             elif params == 3:
+                mel, lf0, vuv = multistream_features
+                fftlen = pyworld.get_cheaptrick_fft_size(self.sample_rate)
+                log_mel_spectrum = mel
+#
+                # 逆変換
+                mel_spectrum = inverse_log_mel(log_mel_spectrum)
+                linear_spectrum = inverse_mel_filter_bank(mel_spectrum, mel_filter_bank)  # 逆メル変換
+                reconstructed_signal = inverse_fft(linear_spectrum)  # 逆FFT
+#
+                reconstructed_spectrum = self.inverse_mel_filter_bank(mel_spectrum, mel_filter_bank)
+                spectrogram = pyworld.decode_spectral_envelope(reconstructed_spectrum, self.sample_rate, fftlen)
+#
+                f0 = lf0.copy()
+                f0[np.nonzero(f0)] = np.exp(f0[np.nonzero(f0)])
+                f0[vuv < vuv_threshold] = 0
+                
                 data = self.predict_waveform(
                     multistream_features=multistream_features,
                     vocoder_type=vocoder_type,
@@ -570,6 +612,139 @@ class SimpleEnunuServer(SPSVS):
                     fmt='%.16f',
                     delimiter=','
                 )
+
+                
+    def svs_synthe(
+        self,
+        labels,
+        vocoder_type='world',
+        post_filter_type='gv',
+        trajectory_smoothing=True,
+        trajectory_smoothing_cutoff=50,
+        trajectory_smoothing_cutoff_f0=20,
+        vuv_threshold=0.5,
+        style_shift=0,
+        force_fix_vuv=False,
+        fill_silence_to_rest=False,
+        dtype=np.int16,
+        peak_norm=False,
+        loudness_norm=False,
+        target_loudness=-20,
+        segmented_synthesis=False,
+        kind='linear',
+        **kwargs
+    ):
+        """Synthesize waveform from HTS labels.
+        Args:
+            labels (nnmnkwii.io.hts.HTSLabelFile): HTS labels
+            vocoder_type (str): Vocoder type. One of ``world``, ``pwg`` or ``usfgan``.
+                If ``auto`` is specified, the vocoder is automatically selected.
+            post_filter_type (str): Post-filter type. ``merlin``, ``gv`` or ``nnsvs``
+                is supported.
+            trajectory_smoothing (bool): Whether to smooth acoustic feature trajectory.
+            trajectory_smoothing_cutoff (int): Cutoff frequency for trajectory smoothing.
+            trajectory_smoothing_cutoff_f0 (int): Cutoff frequency for trajectory
+                smoothing of f0.
+            vuv_threshold (float): Threshold for VUV.
+            style_shift (int): style shift parameter
+            force_fix_vuv (bool): Whether to correct VUV.
+            fill_silence_to_rest (bool): Fill silence to rest frames.
+            dtype (np.dtype): Data type of the output waveform.
+            peak_norm (bool): Whether to normalize the waveform by peak value.
+            loudness_norm (bool): Whether to normalize the waveform by loudness.
+            target_loudness (float): Target loudness in dB.
+            segmneted_synthesis (bool): Whether to use segmented synthesis.
+        """
+        start_time = time.time()
+        vocoder_type = vocoder_type.lower()
+        if vocoder_type not in ["world", "pwg", "usfgan", "auto"]:
+            raise ValueError(f"Unknown vocoder type: {vocoder_type}")
+        if post_filter_type not in ["merlin", "nnsvs", "gv", "none"]:
+            raise ValueError(f"Unknown post-filter type: {post_filter_type}")
+        
+        # 編集後のfull_timing を読み取る
+        duration_modified_labels = self.predict_timing(labels)
+        
+        # NOTE: segmented synthesis is not well tested. There MUST be better ways
+        # to do this.
+        if segmented_synthesis:
+            self.logger.warning(
+                "Segmented synthesis is not well tested. Use it on your own risk."
+            )
+            # NOTE: ここsegment_labels が nnsvs の中の関数にあるので呼び出せるように改造済み
+            duration_modified_labels_segs = nnsvs.io.hts.segment_labels(
+                duration_modified_labels,
+                # the following parameters are based on experiments in the NNSVS's paper
+                # tuned with Namine Ritsu's database
+                silence_threshold=0.1,
+                min_duration=1.9,
+                force_split_threshold=5.0,
+            )
+            from tqdm.auto import tqdm
+        else:
+            duration_modified_labels_segs = [duration_modified_labels]
+
+            def tqdm(x, **kwargs):
+                return x
+
+        # Run acoustic model and vocoder
+        hts_frame_shift = int(self.config.frame_period * 1e4)
+        wavs = []
+        self.logger.info(
+            f"Number of segments: {len(duration_modified_labels_segs)}")
+        for duration_modified_labels_seg in tqdm(
+            duration_modified_labels_segs,
+            desc="[segment]",
+            total=len(duration_modified_labels_segs),
+        ):
+            duration_modified_labels.frame_shift = hts_frame_shift
+
+            # Predict acoustic features
+            # NOTE: if non-zero pre_f0_shift_in_cent is specified, the input pitch
+            # will be shifted before running the acoustic model
+            acoustic_features = self.predict_acoustic(
+                duration_modified_labels,
+                f0_shift_in_cent=style_shift * 100,
+            )
+
+            # Post-processing for acoustic features
+            # NOTE: if non-zero post_f0_shift_in_cent is specified, the output pitch
+            # will be shifted as a part of post-processing
+            multistream_features = self.postprocess_acoustic(
+                acoustic_features=acoustic_features,
+                duration_modified_labels=duration_modified_labels,
+                trajectory_smoothing=trajectory_smoothing,
+                trajectory_smoothing_cutoff=trajectory_smoothing_cutoff,
+                trajectory_smoothing_cutoff_f0=trajectory_smoothing_cutoff_f0,
+                force_fix_vuv=force_fix_vuv,
+                fill_silence_to_rest=fill_silence_to_rest,
+                f0_shift_in_cent=-style_shift * 100,
+            )
+
+            # Generate waveform by vocoder
+            wav = self.predict_waveform(
+                multistream_features=multistream_features,
+                vocoder_type=vocoder_type,
+                vuv_threshold=vuv_threshold,
+            )
+
+            wavs.append(wav)
+
+        # Concatenate segmented waveforms
+        wav = np.concatenate(wavs, axis=0).reshape(-1)
+
+        # Post-processing for the output waveform
+        wav = self.postprocess_waveform(
+            wav,
+            dtype=dtype,
+            peak_norm=peak_norm,
+            loudness_norm=loudness_norm,
+            target_loudness=target_loudness,
+        )
+        self.logger.info(f"Total time: {time.time() - start_time:.3f} sec")
+        RT = (time.time() - start_time) / (len(wav) / self.sample_rate)
+        self.logger.info(f"Total real-time factor: {RT:.3f}")
+        return wav, self.sample_rate
 
     
     def svs(
@@ -943,6 +1118,23 @@ def run_synthesizer(config: DictConfig, temp_dir: str,out_wav_path: str,engine: 
             out_wav_path
         )
 
+    elif synthesizer == 'synthe':
+        print(f'{datetime.now()} : synthesizing WAV with built-in function')
+        # フルラベルファイルを読み取る
+        logging.info('Loading LAB')
+        labels = hts.load(path_full_timing).round_()
+        # WAVファイル出力
+        wav_data,sample_rate = engine.svs_synthe(
+            labels=labels,
+            dtype=np.float32,
+            vocoder_type='auto',
+            post_filter_type='gv',
+            force_fix_vuv=True,
+            segmented_synthesis=False,
+        )
+        wav_data = adjust_wav_gain_for_float32(wav_data)
+        wavfile.write(out_wav_path, rate=sample_rate, data=wav_data)
+
     # 別途指定するソフトで合成する場合
     else:
         print(f'{datetime.now()} : synthesizing WAV with {synthesizer}')
@@ -995,6 +1187,24 @@ def setup(path_plugin: str):
     logging.info('reading settings in TMP')
     path_ust, voice_dir, _ = get_project_path(path_plugin)
 
+    # 日付時刻を取得
+    str_now = datetime.now().strftime('%Y%m%d_%H%M%S')
+
+    # 入出力パスを設定する
+    if path_ust is not None:
+        songname = splitext(basename(path_ust))[0]
+        out_dir = dirname(path_ust)
+        temp_dir = join(out_dir, f'{songname}_enutemp')
+        path_wav = abspath(join(out_dir, f'{songname}__{str_now}.wav'))
+    # WAV出力パス指定なしかつUST未保存の場合
+    else:
+        logging.info('USTが保存されていないので一時フォルダにWAV出力します。')
+        songname = f'temp__{str_now}'
+        out_dir = mkdtemp(prefix='enunu-')
+        temp_dir = join(out_dir, f'{songname}_enutemp')
+        path_wav = abspath(join(out_dir, f'{songname}__{str_now}.wav'))
+    makedirs(temp_dir, exist_ok=True)
+
     # ENUNU<1.0.0 向けの構成のモデルな場合
     if exists(join(voice_dir, 'enuconfig.yaml')):
         logging.info(
@@ -1005,6 +1215,7 @@ def setup(path_plugin: str):
                 # configファイルを読み取る
                     print(f'{datetime.now()} : reading enuconfig')
                     config = DictConfig(OmegaConf.load(f))
+                    config = set_config(config,model_dir,temp_dir)
                 model_dir = join(voice_dir, 'model')
                 makedirs(model_dir, exist_ok=True)
                 print('----------------------------------------------')
@@ -1023,7 +1234,7 @@ def setup(path_plugin: str):
             # configファイルを読み取る
                 print(f'{datetime.now()} : reading enuconfig')
                 config = DictConfig(OmegaConf.load(f))
-                config = set_config(config,model_dir)
+                config = set_config(config,model_dir,temp_dir)
                 logging.info('Converted.')
         except Exception as e:
             print(e)
@@ -1036,7 +1247,7 @@ def setup(path_plugin: str):
             # configファイルを読み取る
                 print(f'{datetime.now()} : reading enuconfig')
                 config = DictConfig(OmegaConf.load(f))
-                config = set_config(config,model_dir)
+                config = set_config(config,model_dir,temp_dir)
                 logging.info('Converted.')
         except Exception as e:
             print(e)
@@ -1051,24 +1262,6 @@ def setup(path_plugin: str):
 
     # カレントディレクトリを音源フォルダに変更する
     chdir(voice_dir)
-
-    # 日付時刻を取得
-    str_now = datetime.now().strftime('%Y%m%d_%H%M%S')
-
-    # 入出力パスを設定する
-    if path_ust is not None:
-        songname = splitext(basename(path_ust))[0]
-        out_dir = dirname(path_ust)
-        temp_dir = join(out_dir, f'{songname}_enutemp')
-        path_wav = abspath(join(out_dir, f'{songname}__{str_now}.wav'))
-    # WAV出力パス指定なしかつUST未保存の場合
-    else:
-        logging.info('USTが保存されていないので一時フォルダにWAV出力します。')
-        songname = f'temp__{str_now}'
-        out_dir = mkdtemp(prefix='enunu-')
-        temp_dir = join(out_dir, f'{songname}_enutemp')
-        path_wav = abspath(join(out_dir, f'{songname}__{str_now}.wav'))
-    makedirs(temp_dir, exist_ok=True)
 
     # 各種出力ファイルのパスを設定
     # path_plugin = path_plugin
@@ -1192,7 +1385,6 @@ def main(path_plugin: str, path_wav: Union[str, None] = None, play_wav=True) -> 
     )
 
     # wav出力のフォーマットを確認する
-    print(sample_rate)
 
     wav_data = adjust_wav_gain_for_float32(wav_data)
     wavfile.write(path_wav, rate=sample_rate, data=wav_data)

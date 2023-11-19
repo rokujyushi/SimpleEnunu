@@ -6,7 +6,7 @@ ENUNUで外部ツールを呼び出すときに必要な関数とか
 
 import subprocess
 from os import getcwd
-from os.path import abspath, dirname, exists, isfile, splitext,join
+from os.path import abspath, dirname, exists, isfile, splitext
 from sys import executable
 from typing import Union
 
@@ -90,9 +90,9 @@ def parse_extension_path(path) -> Union[str, None]:
     enunu_dir = dirname(dirname(__file__))
     utau_dir = utaupy.utau.utau_root()
     # 置換
-    path = path.replace(r'%e', enunu_dir).replace("\\","/")
-    path = path.replace(r'%v', voice_dir).replace("\\","/")
-    path = path.replace(r'%u', utau_dir).replace("\\","/")
+    path = path.replace(r'%e', enunu_dir)
+    path = path.replace(r'%v', voice_dir)
+    path = path.replace(r'%u', utau_dir)
     return path
 
 
@@ -106,7 +106,6 @@ def run_extension(path=None, **kwargs):
     # パスに含まれるエイリアスを展開
     path = parse_extension_path(path)
     if not exists(path):
-
         raise ValueError(f'指定されたファイルが見つかりません。({path})')
     if not isfile(path):
         raise ValueError(f'指定されたパスはファイルではありません。({path})')

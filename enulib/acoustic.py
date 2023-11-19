@@ -29,33 +29,17 @@
 """
 発声タイミングの情報を持ったフルラベルから、WORLD用の音響特長量を推定する。
 """
-import logging
-import sys
-from os.path import dirname, exists, join, relpath, splitext,abspath,split
 import hydra
 import joblib
 import numpy as np
 import torch
 from hydra.utils import to_absolute_path
 from nnmnkwii.io import hts
+from nnsvs.gen import predict_acoustic
+from nnsvs.logger import getLogger
 from omegaconf import DictConfig, OmegaConf
 
 from enulib.common import set_checkpoint, set_normalization_stat
-
-# NNSVSをimportできるようにする
-if exists(join(abspath(join(__file__, '../..')), 'nnsvs-master')):
-    sys.path.append(join(abspath(join(__file__, '../..')), 'nnsvs-master'))
-elif exists(join(abspath(join(__file__, '../..')), 'nnsvs')):
-    sys.path.append(join(abspath(join(__file__, '../..')), 'nnsvs'))
-else:
-    logging.error('NNSVS directory is not found.')
-
-import nnsvs  # pylint: disable=import-error
-from nnsvs.gen import predict_acoustic
-from nnsvs.logger import getLogger
-
-logging.debug('Imported NNSVS module: %s', nnsvs)
-
 
 logger = None
 

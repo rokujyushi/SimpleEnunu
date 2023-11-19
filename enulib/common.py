@@ -10,7 +10,7 @@ import numpy as np
 import utaupy
 from hydra.utils import to_absolute_path
 from nnmnkwii.io import hts
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig
 
 
 def full2mono(path_full, path_mono):
@@ -50,14 +50,12 @@ def set_checkpoint(config: DictConfig, typ: str):
     """
     if config.model_dir is None:
         raise ValueError('"model_dir" config is required')
-    
     model_dir = to_absolute_path(config.model_dir)
     # config.timelagに項目を追加
     config[typ].model_yaml = \
         join(model_dir, typ, 'model.yaml')
     config[typ].checkpoint = \
         join(model_dir, typ, config[typ].checkpoint)
-    
 
 
 def set_normalization_stat(config: DictConfig, typ: str):
@@ -66,7 +64,6 @@ def set_normalization_stat(config: DictConfig, typ: str):
     """
     if config.stats_dir is None:
         raise ValueError('"stats_dir" config is required')
-    
     stats_dir = to_absolute_path(config.stats_dir)
     # config.timelagに項目を追加
     config[typ].in_scaler_path = \

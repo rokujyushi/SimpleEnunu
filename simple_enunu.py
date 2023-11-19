@@ -281,7 +281,7 @@ class SimpleEnunu(SPSVS):
         # NOTE: ここにタイミング補正のための割り込み処理を追加-----------
         # mono_score を出力
         with open(self.path_mono_score, 'w', encoding='utf-8') as f:
-            f.write(str(nnsvs.io.hts.full_to_mono(labels)))
+            f.write(str(nnsvs.io.hts.full_to_mono(duration_modified_labels)))
         # mono_timing を出力
         with open(self.path_mono_timing, 'w', encoding='utf-8') as f:
             f.write(str(nnsvs.io.hts.full_to_mono(duration_modified_labels)))

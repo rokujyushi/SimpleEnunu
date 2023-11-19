@@ -40,8 +40,19 @@ def timing(path_ust: str):
 
 def acoustic(path_ust: str):
     config, temp_dir,engine = enunu_steps.setup(path_ust)
-    
-    path_full_timing, path_mono_timing = enunu_steps.run_timing(config, temp_dir,engine)
+
+    path_temp_ust, path_temp_table, \
+    path_full_score, path_mono_score, \
+    path_full_timing, path_mono_timing, \
+    path_acoustic, path_f0, path_spectrogram, \
+    path_aperiodicity, temp_path_question = enunu_steps.get_paths(temp_dir)
+
+    enulib.utauplugin2score.utauplugin2score(
+        path_temp_ust,
+        path_temp_table,
+        path_full_timing,
+        strict_sinsy_style=False
+    )
 
     path_acoustic, path_f0, path_spectrogram, \
         path_aperiodicity = enunu_steps.run_acoustic(config, temp_dir,engine)
@@ -62,8 +73,19 @@ def acoustic(path_ust: str):
 
 def synthe(path_ust: str,out_wav_path: str):
     config, temp_dir,engine = enunu_steps.setup(path_ust)
-    
-    path_full_timing, path_mono_timing = enunu_steps.run_timing(config, temp_dir,engine)
+
+    path_temp_ust, path_temp_table, \
+    path_full_score, path_mono_score, \
+    path_full_timing, path_mono_timing, \
+    path_acoustic, path_f0, path_spectrogram, \
+    path_aperiodicity, temp_path_question = enunu_steps.get_paths(temp_dir)
+
+    enulib.utauplugin2score.utauplugin2score(
+        path_temp_ust,
+        path_temp_table,
+        path_full_timing,
+        strict_sinsy_style=False
+    )
 
     path_wav = enunu_steps.run_synthesizer(config, temp_dir,out_wav_path,engine)
 
