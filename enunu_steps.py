@@ -495,6 +495,17 @@ class SimpleEnunuServer(SPSVS):
         
         # 編集後のfull_timing を読み取る
         duration_modified_labels = self.predict_timing(labels)
+        # NOTE: ここにタイミング補正のための割り込み処理を追加-----------
+        # mono_score を出力
+        with open(self.path_mono_score, 'w', encoding='utf-8') as f:
+            f.write(str(nnsvs.io.hts.full_to_mono(duration_modified_labels)))
+        # mono_timing を出力
+        with open(self.path_mono_timing, 'w', encoding='utf-8') as f:
+            f.write(str(nnsvs.io.hts.full_to_mono(duration_modified_labels)))
+        # full_timing を出力
+        with open(self.path_full_timing, 'w', encoding='utf-8') as f:
+            f.write(str(duration_modified_labels))
+        duration_modified_labels = self.edit_timing(duration_modified_labels)
         
         # NOTE: segmented synthesis is not well tested. There MUST be better ways
         # to do this.
