@@ -1,19 +1,8 @@
-# SimpleEnunuServer
-
-https://github.com/rokujyushi/ENUNU
-サーバーシステムはこちらをベースに作成しています。
-
-The server system is based on this one.
+# SimpleEnunu
 
 メンテしやすく、最新のNNSVSが使いやすいようにしたENUNUです。
 
 Another ENUNU for enthusiasts and developers, easy to catch up with NNSVS.
-
-SimpleEnunu-0.1.0+0.local.7をベースに作成したEnunuServerです。
-OpenUTAUに対応する目的で作成されました。
-
-EnunuServer created based on SimpleEnunu-0.1.0+0.local.7.
-It was created for the purpose of supporting OpenUTAU.
 
 
 ## How to install / インストール方法
@@ -28,18 +17,59 @@ Launch UTAU and D&D SimpleEnunu-{version}.zip into the window.
 3. USTファイルを保存 / Save UST
 4. ノートを2つ以上選択してプラグイン一覧からSimpleEnunuを起動 / Launch SimpleEnunu as a UTAU plugin
 
-## How to use the latest NNSVS (development version) / 同梱NNSVSの更新方法
+## How to activate extensions / 拡張機能の使い方
 
-1. Download the latest nnsvs from https://github.com/nnsvs/nnsvs
-2. Replace local nnsvs-master directory
+- `%e` : SimpleEnunu のフォルダ / The directory "simple_enunu.py" exists in
+- `%v` : SimpleEnunu 用モデルのフォルダ / The directory voicebank and "config.yaml" exist in
+- `%u` : UTAU のフォルダ / The directory "utau.exe" exists in
+
+```yaml
+# sample of config.yaml to activate extensions
+extensions:
+    ust_editor: "%e/extensions/voicecolor_applier/voicecolor_applier.py"
+    timing_editor: "%e/extensions/velocity_applier.py"
+```
+
+## Bundled extensions / 同梱の拡張機能一覧
+
+- voicecolor_applier (ust_editor)
+  - `あ強` などの表情サフィックスを使用可能にします。（例：`強` が含まれる場合は `Power` をフラグ欄に追記します。）
+
+- dummy (-)
+  - とくに何もしません。デバッグ用です。
+
+- lyric_nyaizer (ust_editor)
+  - 歌詞を `ny a` にします。主にデバッグ用です。
+
+- timing_repairer (timing_editor)
+  - ラベル内の音素の発声時間に不具合がある場合に自動修正を試みます。
+
+- velocity_applier (timing_editor)
+  - USTの子音速度をもとに子音の長さを調節します。
+
 
 ## Development environment / 開発環境
 
 - Windows 10
 - Python 3.9
-  - utaupy 1.18.0
+  - utaupy 1.18.3
   - numpy 1.23.5
-  - torch  1.13.1+cu117
+  - torch  2.0.0+cu118
   - nnsvs (dev)
   - scikit-learn 1.1.3
 - CUDA 11.7
+
+## How to use the latest NNSVS (development version) / 同梱NNSVSの更新方法
+
+1. Download the latest nnsvs from https://github.com/nnsvs/nnsvs
+2. Replace local nnsvs-master directory
+
+## 環境構築メモ
+
+- python embeddable に SiFiGAN をインストールするとき、docopt が無いとエラーが出る。インストール版の Python から docopt をコピーして対処。(2024/05/19)
+- python embeddable に tkinter がないのでインストール版の Python から下記内容でコピーして対処。(2024/05/26)
+  - python/tcl/  → python-embeddable/tcl/
+  - python/Lib/tkinter/ → python/tkinter/
+  - python/DLLs/_tkinter.pyd → python-embeddable/_tkinter.pyd 
+  - python/DLLs/tcl86t.pyd → python-embeddable/tcl86t.pyd 
+  - python/DLLs/tk86t.pyd → python-embeddable/tk86t.pyd 

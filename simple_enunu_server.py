@@ -6,13 +6,13 @@ import json
 import os
 import subprocess
 import sys
+import time
 import traceback
 from datetime import datetime
 
 sys.path.append(os.path.dirname(__file__))
 import numpy as np
-import enunu_steps
-import enulib
+import simple_enunu
 try:
     import zmq
 except ModuleNotFoundError:
@@ -23,78 +23,79 @@ except ModuleNotFoundError:
     import zmq
 # fmt: on
 
+def check():
+    return{
+        'name': 'SimpleENUNUServer',
+        'version': '0.4.0',
+        'author': 'roku10shi',
+    }
 
-def timing(path_ust: str):
-    config, temp_dir,engine = enunu_steps.setup(path_ust)
-    path_full_timing, path_mono_timing = enunu_steps.run_timing(config, temp_dir,engine)
+def timing(engine: simple_enunu.SimpleEnunu):
+    print('timing: start')
+    simple_enunu.run_timing(engine=engine)
     
-    for path in (path_full_timing, path_mono_timing):
+    for path in (engine.path_full_timing, engine.path_mono_timing):
         if not os.path.isfile(path):
             raise Exception(f'{datetime.now()} :`{os.path.basename(path)}` does not exist.')
-
+    print('timing: end')
     return {
-        'path_full_timing': path_full_timing,
-        'path_mono_timing': path_mono_timing,
+        'path_full_timing': engine.path_full_timing,
+        'path_mono_timing': engine.path_mono_timing,
     }
 
 
-def acoustic(path_ust: str):
-    config, temp_dir,engine = enunu_steps.setup(path_ust)
-
-    path_temp_ust, path_temp_table, \
-    path_full_score, path_mono_score, \
-    path_full_timing, path_mono_timing, \
-    path_acoustic, path_f0, path_spectrogram, \
-    path_aperiodicity, temp_path_question = enunu_steps.get_paths(temp_dir)
-
-    enulib.utauplugin2score.utauplugin2score(
-        path_temp_ust,
-        path_temp_table,
-        path_full_timing,
-        strict_sinsy_style=False
-    )
-
-    path_acoustic, path_f0, path_spectrogram, \
-        path_aperiodicity = enunu_steps.run_acoustic(config, temp_dir,engine)
-    
-    
-
-    for path in (path_f0, path_spectrogram, path_aperiodicity):
-        if os.path.isfile(path):
-            arr = np.loadtxt(path, delimiter=',', dtype=np.float64)
-            np.save(path[:-4] + '.npy', arr)
-            os.remove(path)
+def acoustic(style_shift: int ,engine: simple_enunu.SimpleEnunu):
+    print('acoustic: start')
+    if not set_features(engine):
+        simple_enunu.run_timing(engine=engine,step='acoustic')
+        simple_enunu.run_acoustic(engine=engine,style_shift=int(style_shift))
+        simple_enunu.run_npy(engine=engine)
+    print('acoustic: end')
     return {
-        'path_acoustic': path_acoustic,
-        'path_f0': path_f0,
-        'path_spectrogram': path_spectrogram,
-        'path_aperiodicity': path_aperiodicity,
+        'path_f0': engine.path_f0,
+        'path_spectrogram': engine.path_spectrogram,
+        'path_aperiodicity': engine.path_aperiodicity,
+        'path_mel': engine.path_mel,
+        'path_vuv': engine.path_vuv,
     }
 
-def synthe(path_ust: str,out_wav_path: str):
-    config, temp_dir,engine = enunu_steps.setup(path_ust)
-
-    path_temp_ust, path_temp_table, \
-    path_full_score, path_mono_score, \
-    path_full_timing, path_mono_timing, \
-    path_acoustic, path_f0, path_spectrogram, \
-    path_aperiodicity, temp_path_question = enunu_steps.get_paths(temp_dir)
-
-    enulib.utauplugin2score.utauplugin2score(
-        path_temp_ust,
-        path_temp_table,
-        path_full_timing,
-        strict_sinsy_style=False
-    )
-
-    path_wav = enunu_steps.run_synthesizer(config, temp_dir,out_wav_path,engine)
-
-    
-    
+def synthe(out_wav_path: str,engine: simple_enunu.SimpleEnunu):
+    print('synthe: start')
+    set_features(engine)
+    simple_enunu.run_synthesizer(out_wav_path=out_wav_path,engine=engine)
+    print('synthe: end')
     return {
-        'path_wav': path_wav,
+        'path_wav': out_wav_path,
     }
 
+def set_features(engine: simple_enunu.SimpleEnunu):
+    if os.path.exists(engine.path_editorf0) or os.path.exists(engine.path_mel) or os.path.exists(engine.path_vuv):
+        print('set_features: update features')
+        f0 = np.load(engine.path_editorf0)
+        f0 = np.array(f0).reshape(-1, 1)
+        lf0 = f0.copy()
+        lf0[np.nonzero(f0)] = np.log(f0[np.nonzero(f0)])
+        mel = np.load(engine.path_mel)
+        vuv = np.load(engine.path_vuv)
+        # 要素を代入
+        multistream_features_list = [mel, lf0, vuv]
+        # リストをタプルに戻す
+        engine.multistream_features = tuple(multistream_features_list)
+        return True
+    elif os.path.exists(engine.path_f0) or os.path.exists(engine.path_mel) or os.path.exists(engine.path_vuv):
+        print('set_features: update features')
+        f0 = np.load(engine.path_f0)
+        f0 = np.array(f0).reshape(-1, 1)
+        lf0 = f0.copy()
+        lf0[np.nonzero(f0)] = np.log(f0[np.nonzero(f0)])
+        mel = np.load(engine.path_mel)
+        vuv = np.load(engine.path_vuv)
+        # 要素を代入
+        multistream_features_list = [mel, lf0, vuv]
+        # リストをタプルに戻す
+        engine.multistream_features = tuple(multistream_features_list)
+        return True
+    return False
 
 def poll_socket(socket, timetick = 100):
     poller = zmq.Poller()
@@ -113,23 +114,58 @@ def poll_socket(socket, timetick = 100):
 def main():
     context = zmq.Context()
     socket = context.socket(zmq.REP)
-    socket.bind('tcp://*:15555')
+    socket.bind('tcp://*:15556')
     print('Started enunu server')
 
+
+    #support = False
+    engine_dict = {}
+
     for message in poll_socket(socket):
+        """
+        request body
+        request[0]:step,
+        request[1]:ust_path,
+        request[2]:wav_path,
+        request[3]:singer_name,
+        request[4]:duration,
+        request[5]:style_shift
+        """
         request = json.loads(message)
         print('Received request: %s' % request)
 
         response = {}
+        engine,duration,request_time = None,600,None
         try:
-            if request[0] == 'timing':
-                response['result'] = timing(request[1])
-            elif request[0] == 'acoustic':
-                response['result'] = acoustic(request[1])
-            elif request[0] == 'synthe':
-                response['result'] = synthe(request[1],request[2])
+            if request[0] == 'ver_check':
+                support = True
+                response['result'] = check()
+            elif support:
+                if request[3] in engine_dict:
+                    engine,duration,request_time = engine_dict[request[3]]
+                    simple_enunu.updete_path(request[1],engine)
+                else:
+                    duration = int(request[4])
+                    engine = simple_enunu.setup(request[1],engine,True)
+                    request_time = time.time()
+                    engine_dict[request[3]] = engine,duration,request_time
+
+
+                if request[0] == 'timing':
+                    response['result'] = timing(engine)
+                elif request[0] == 'acoustic':
+                    response['result'] = acoustic(request[5],engine)
+                elif request[0] == 'synthe':
+                    response['result'] = synthe(request[2],engine)
+                else:
+                    raise NotImplementedError('unexpected command %s' % request[1])
+            
+                keys_to_delete = [key for key in engine_dict.keys() if (time.time() - request_time ) > engine_dict[key][1]]
+                for key in keys_to_delete:
+                    del engine_dict[key]
             else:
-                raise NotImplementedError('unexpected command %s' % request[0])
+                response['error'] = 'run ver_check.'
+            
         except Exception as e:
             response['error'] = str(e)
             traceback.print_exc()

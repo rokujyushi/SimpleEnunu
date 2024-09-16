@@ -25,7 +25,7 @@ nvcc : 用語 'nvcc' は、コマンドレット、関数、スクリプト フ�
 
 import subprocess
 import sys
-from os.path import abspath, dirname, join
+from os.path import abspath
 
 PYTORCH_STABLE_URL = 'https://download.pytorch.org/whl/torch_stable.html'
 PYTORCH_PACKAGES_DICT = {
@@ -70,24 +70,29 @@ def pip_install_torch(python_exe):
     except FileNotFoundError:
         pytorch_packages = get_pytorch_package_list('cpu')
     # Pytorchをインストールする。
-    command = [python_exe, '-m', 'pip', 'install'] + pytorch_packages.split()
+    command = [python_exe, '-m', 'pip', 'install',
+               '--quiet'] + pytorch_packages.split()
     print('command:', command)
     subprocess.run(command, check=True)
 
 
 def ltt_install_torch(python_exe):
-    """dirname(python.exe)/Scripts/ltt.exe install torch torchaudio torchvision
+    """
+    python -m light_the_torch install torch torchaudio torchvision
     """
     # Upgrade pip and ltt
-    command = [python_exe, '-q', '-m', 'pip', 'install',
-               '--upgrade', 'pip', 'light-the-torch']
+    command = [python_exe,
+               '-m', 'pip', 'install', '--upgrade', 'light-the-torch',
+               '--no-warn-script-location',
+               '--disable-pip-version-check',
+               ]
     subprocess.run(command, check=True)
     # Install pytorch
-    ltt_exe = join(dirname(python_exe), 'Scripts', 'ltt.exe')
-    command = [ltt_exe,
-               '--quiet', '--isolated',
-               '--python', python_exe,
-               'install', 'torch', 'torchaudio', 'torchvision']
+    command = [python_exe, '-m', 'light_the_torch', 'install',
+               'torch', 'torchaudio', 'torchvision',
+               '--no-warn-script-location',
+               '--disable-pip-version-check',
+               ]
     subprocess.run(command, check=True)
 
 

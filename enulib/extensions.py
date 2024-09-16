@@ -88,11 +88,11 @@ def parse_extension_path(path) -> Union[str, None]:
     # 各種パスを取得
     voice_dir = getcwd()
     enunu_dir = dirname(dirname(__file__))
-    utau_dir = utaupy.utau.utau_root()
+    #utau_dir = utaupy.utau.utau_root()
     # 置換
     path = path.replace(r'%e', enunu_dir)
     path = path.replace(r'%v', voice_dir)
-    path = path.replace(r'%u', utau_dir)
+    #path = path.replace(r'%u', utau_dir)
     return path
 
 
