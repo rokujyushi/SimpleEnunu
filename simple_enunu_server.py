@@ -32,7 +32,7 @@ def check():
 
 def timing(engine: simple_enunu.SimpleEnunu):
     print('timing: start')
-    simple_enunu.run_timing(engine=engine)
+    simple_enunu.run_timing(engine=engine,)
     
     for path in (engine.path_full_timing, engine.path_mono_timing):
         if not os.path.isfile(path):
@@ -118,7 +118,7 @@ def main():
     print('Started enunu server')
 
 
-    #support = False
+    support = False
     engine_dict = {}
 
     for message in poll_socket(socket):

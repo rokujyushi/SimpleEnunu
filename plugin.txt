@@ -1,2 +1,2 @@
-name=SimpleEnunuServer-0.4.0 (&9)
+name=SimpleEnunuServer v0.4.1 (&9)
 execute=.\simple_enunu_start.bat

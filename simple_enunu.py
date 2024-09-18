@@ -756,24 +756,27 @@ def run_timing(engine: SimpleEnunu,step=None):
         strict_sinsy_style=False,
     )
 
-    # フルラベルファイルを読み取る
-    logging.info('Loading LAB')
-    labels = hts.load(engine.path_full_score)
-
-    # LABファイルを編集する。
-    labels = engine.edit_score(labels)
-
-    engine.svs_timing(
-        labels=labels,
-        dtype=np.float32,
-        vocoder_type='auto',
-        post_filter_type='gv',
-        force_fix_vuv=True,
-        segmented_synthesis=True,
-    )
+    
     if step is None:
+        # フルラベルファイルを読み取る
+        logging.info('Loading LAB')
+        labels = hts.load(engine.path_full_score)
+
+        # LABファイルを編集する。
+        labels = engine.edit_score(labels)
+
+        engine.svs_timing(
+            labels=labels,
+            dtype=np.float32,
+            vocoder_type='auto',
+            post_filter_type='gv',
+            force_fix_vuv=True,
+            segmented_synthesis=True,
+        )
         duration_modified_labels = hts.load(engine.path_full_timing).round_()
         duration_modified_labels = engine.edit_timing(duration_modified_labels)
+    else:
+        engine.path_full_timing = engine.path_full_score
 
 def run_acoustic(engine: SimpleEnunu,kind='linear',style_shift=0):
     engine.svs_acoustic(

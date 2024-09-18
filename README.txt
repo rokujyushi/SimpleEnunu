@@ -1,15 +1,26 @@
-# SimpleEnunu
+# SimpleEnunuServer
+
+https://github.com/rokujyushi/ENUNU
+サーバーシステムはこちらをベースに作成しています。
+
+The server system is based on this one.
 
 メンテしやすく、最新のNNSVSが使いやすいようにしたENUNUです。
 
 Another ENUNU for enthusiasts and developers, easy to catch up with NNSVS.
 
+SimpleEnunu-0.3.1をベースに作成したEnunuServerです。
+OpenUTAUに対応する目的で作成されました。
+
+EnunuServer created based on SimpleEnunu-0.3.1.
+It was created for the purpose of supporting OpenUTAU.
+
 
 ## How to install / インストール方法
 
-UTAU を起動し、**SimpleEnunu-{version}.zip** をUTAUのウィンドウにドラッグアンドドロップしてください。 
+UTAU を起動し、**SimpleEnunuServer-{version}.zip** をUTAUのウィンドウにドラッグアンドドロップしてください。 
 
-Launch UTAU and D&D SimpleEnunu-{version}.zip into the window.
+Launch UTAU and D&D SimpleEnunuServer-{version}.zip into the window.
 
 ## How to use / 使い方
 1. UTAUを起動 / Launch UTAU
